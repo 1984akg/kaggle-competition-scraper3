@@ -6,6 +6,19 @@ import time
 import re
 from datetime import datetime
 
+# Selenium imports
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    print("Warning: Selenium not available. Discussion scraping will be limited.")
+
 # Try to import Kaggle API, but make it optional
 try:
     from kaggle.api.kaggle_api_extended import KaggleApi
@@ -19,7 +32,7 @@ except Exception as e:
 
 
 class KaggleCompetitionScraper:
-    def __init__(self):
+    def __init__(self, use_selenium=True):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -28,7 +41,42 @@ class KaggleCompetitionScraper:
             'Connection': 'keep-alive',
         })
         self.kaggle_api = None
+        self.use_selenium = use_selenium and SELENIUM_AVAILABLE
+        self.driver = None
         self._init_kaggle_api()
+        if self.use_selenium:
+            self._init_selenium_driver()
+    
+    def _init_selenium_driver(self):
+        """Initialize Selenium WebDriver"""
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--disable-web-security')
+            chrome_options.add_argument('--allow-running-insecure-content')
+            
+            self.driver = webdriver.Chrome(
+                service=webdriver.chrome.service.Service(ChromeDriverManager().install()),
+                options=chrome_options
+            )
+            print("Selenium WebDriver initialized successfully")
+            
+        except Exception as e:
+            print("Warning: Could not initialize Selenium WebDriver:", e)
+            self.driver = None
+            self.use_selenium = False
+    
+    def __del__(self):
+        """Clean up WebDriver"""
+        if hasattr(self, 'driver') and self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
     
     def _init_kaggle_api(self):
         """Initialize Kaggle API if credentials are available"""
@@ -148,26 +196,236 @@ class KaggleCompetitionScraper:
         return self._scrape_discussions_web(competition_slug, max_threads)
     
     def _scrape_discussions_web(self, competition_slug, max_threads=20):
-        """Fallback web scraping method for discussions"""
+        """Web scraping method for discussions using Selenium"""
         
-        # Try different approaches to get discussion data
-        approaches = [
-            self._try_api_style_discussions,
-            self._try_mobile_page_discussions,
-            self._try_search_discussions
-        ]
+        if self.use_selenium and self.driver:
+            return self._scrape_discussions_selenium(competition_slug, max_threads)
+        else:
+            print("Selenium not available, trying fallback methods...")
+            # Try different approaches to get discussion data
+            approaches = [
+                self._try_api_style_discussions,
+                self._try_mobile_page_discussions,
+                self._try_search_discussions
+            ]
+            
+            for approach in approaches:
+                try:
+                    discussions = approach(competition_slug, max_threads)
+                    if discussions and len(discussions) > 1:  # More than just placeholder
+                        return discussions
+                except Exception as e:
+                    print("Approach failed:", e)
+                    continue
+            
+            print("All discussion scraping approaches failed")
+            return self._get_placeholder_discussions(competition_slug)
+    
+    def _scrape_discussions_selenium(self, competition_slug, max_threads=20):
+        """Use Selenium to scrape discussions with JavaScript support"""
+        url = "https://www.kaggle.com/competitions/{}/discussion".format(competition_slug)
         
-        for approach in approaches:
+        try:
+            print("Using Selenium to scrape discussions from:", url)
+            self.driver.get(url)
+            
+            # Wait for page to load
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Wait for JavaScript to render content
+            time.sleep(5)
+            
+            # Try to scroll down to load more discussions
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            
+            # Try to find and click "Load more" or "Show more" buttons
             try:
-                discussions = approach(competition_slug, max_threads)
-                if discussions and len(discussions) > 1:  # More than just placeholder
-                    return discussions
-            except Exception as e:
-                print("Approach failed:", e)
-                continue
-        
-        print("All discussion scraping approaches failed")
-        return self._get_placeholder_discussions(competition_slug)
+                load_more_selectors = [
+                    "button[aria-label*='more']",
+                    "button[class*='load']",
+                    "button[class*='show']",
+                    "a[class*='load']",
+                    "[data-testid*='load']",
+                    "[data-testid*='more']"
+                ]
+                
+                for selector in load_more_selectors:
+                    try:
+                        load_more_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        if load_more_btn.is_displayed() and load_more_btn.is_enabled():
+                            self.driver.execute_script("arguments[0].click();", load_more_btn)
+                            time.sleep(3)
+                            break
+                    except:
+                        continue
+            except:
+                pass
+            
+            # Get page source after JavaScript execution
+            html_content = self.driver.page_source
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            print("Page loaded, looking for discussion elements...")
+            
+            # Look for discussion elements with various selectors
+            discussion_selectors = [
+                # Modern Kaggle selectors
+                '[data-testid*="discussion"]',
+                '[data-testid*="topic"]',
+                '[data-testid*="thread"]',
+                # Class-based selectors
+                'div[class*="discussion"]',
+                'div[class*="topic"]',
+                'tr[class*="topic"]',
+                'li[class*="topic"]',
+                # Generic selectors for discussion links
+                'a[href*="/discussion/"]'
+            ]
+            
+            discussion_elements = []
+            for selector in discussion_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    discussion_elements = elements
+                    print("Found {} discussion elements with selector: {}".format(len(elements), selector))
+                    break
+            
+            if not discussion_elements:
+                # Fallback: look for any links containing discussion
+                all_links = soup.find_all('a', href=True)
+                discussion_links = [link for link in all_links if '/discussion/' in link.get('href', '')]
+                if discussion_links:
+                    discussion_elements = discussion_links
+                    print("Found {} discussion links as fallback".format(len(discussion_links)))
+            
+            # Extract discussion data
+            discussions = []
+            processed_ids = set()
+            
+            for element in discussion_elements[:max_threads * 2]:  # Process more to account for duplicates
+                discussion_data = self._extract_discussion_from_element(element, competition_slug)
+                if discussion_data and discussion_data['id'] not in processed_ids:
+                    discussions.append(discussion_data)
+                    processed_ids.add(discussion_data['id'])
+                    
+                    if len(discussions) >= max_threads:
+                        break
+            
+            if discussions:
+                print("Successfully extracted {} discussions using Selenium".format(len(discussions)))
+                return discussions
+            else:
+                print("No discussions found with Selenium")
+                return self._get_placeholder_discussions(competition_slug)
+                
+        except Exception as e:
+            print("Error in Selenium discussion scraping:", e)
+            return self._get_placeholder_discussions(competition_slug)
+    
+    def _extract_discussion_from_element(self, element, competition_slug):
+        """Extract discussion data from a single HTML element"""
+        try:
+            # Try to find discussion link
+            discussion_link = None
+            if element.name == 'a' and '/discussion/' in element.get('href', ''):
+                discussion_link = element
+            else:
+                # Look for discussion link within element
+                discussion_link = element.find('a', href=re.compile(r'/discussion/'))
+            
+            if not discussion_link:
+                return None
+            
+            href = discussion_link.get('href', '')
+            if not href:
+                return None
+            
+            # Extract discussion ID
+            match = re.search(r'/discussion/(\d+)', href)
+            if not match:
+                return None
+            
+            discussion_id = match.group(1)
+            
+            # Extract title - clean up messy titles
+            title = discussion_link.get_text().strip()
+            
+            # Clean up common prefixes and suffixes
+            title = re.sub(r'^push_pin', '', title)  # Remove pin indicator
+            title = re.sub(r'·.*$', '', title)  # Remove "· Last comment" etc
+            title = re.sub(r'\s+', ' ', title)  # Normalize whitespace
+            title = title.strip()
+            
+            if not title or len(title) < 5:
+                # Try to find title in parent elements
+                parent = discussion_link.find_parent()
+                if parent:
+                    title_candidates = parent.find_all(['h1', 'h2', 'h3', 'h4', 'div'], limit=3)
+                    for candidate in title_candidates:
+                        candidate_text = candidate.get_text().strip()
+                        if candidate_text and len(candidate_text) > 5 and candidate_text != title:
+                            title = candidate_text
+                            break
+            
+            if not title or len(title) < 5:
+                title = "Discussion Topic {}".format(discussion_id)
+            
+            # Try to extract additional metadata
+            author = "Unknown"
+            reply_count = 0
+            vote_count = 0
+            
+            # Look for author in surrounding elements
+            parent_elem = discussion_link.find_parent()
+            if parent_elem:
+                # Look for author patterns
+                author_selectors = [
+                    '[data-testid*="author"]',
+                    '[class*="author"]',
+                    '[class*="user"]'
+                ]
+                
+                for selector in author_selectors:
+                    author_elem = parent_elem.select_one(selector)
+                    if author_elem:
+                        author = author_elem.get_text().strip()
+                        break
+                
+                # Look for counts
+                count_elements = parent_elem.find_all(text=re.compile(r'\d+'))
+                numbers = []
+                for elem in count_elements:
+                    try:
+                        numbers.append(int(re.search(r'\d+', elem).group()))
+                    except:
+                        pass
+                
+                if numbers:
+                    reply_count = numbers[0] if len(numbers) > 0 else 0
+                    vote_count = numbers[1] if len(numbers) > 1 else 0
+            
+            full_url = href if href.startswith('http') else "https://www.kaggle.com{}".format(href)
+            
+            return {
+                "id": discussion_id,
+                "title": title,
+                "author": author,
+                "replyCount": reply_count,
+                "voteCount": vote_count,
+                "url": full_url,
+                "posts": [{
+                    "author": "System",
+                    "content": "Discussion content loaded via JavaScript. Visit {} for full discussion.".format(full_url),
+                    "date": datetime.now().isoformat()
+                }]
+            }
+            
+        except Exception as e:
+            print("Error extracting discussion from element:", e)
+            return None
     
     def _try_api_style_discussions(self, competition_slug, max_threads):
         """Try to access discussions via internal API endpoints"""
