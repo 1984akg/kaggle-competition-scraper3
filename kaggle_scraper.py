@@ -101,26 +101,194 @@ class KaggleCompetitionScraper:
             }
     
     def scrape_discussion_threads(self, competition_slug, max_threads=20):
-        """Get basic discussion info - simplified approach"""
-        print("Discussion scraping simplified - returning mock data for now")
+        """Get discussion threads using Kaggle API or fallback methods"""
         
-        # For now, return some basic structure
-        # In a real implementation, this would need more sophisticated JS handling
+        # Try Kaggle API first for discussions
+        if self.kaggle_api:
+            try:
+                print("Attempting to get discussions via Kaggle API...")
+                # Try to get discussion list via API
+                discussions = self.kaggle_api.competitions_discussions_list(competition_slug)
+                
+                discussion_threads = []
+                for i, discussion in enumerate(discussions[:max_threads]):
+                    thread_data = {
+                        "id": str(discussion.id),
+                        "title": discussion.title,
+                        "author": discussion.author,
+                        "replyCount": getattr(discussion, 'totalReplies', 0),
+                        "voteCount": getattr(discussion, 'totalVotes', 0),
+                        "url": "https://www.kaggle.com/competitions/{}/discussion/{}".format(competition_slug, discussion.id),
+                        "posts": []
+                    }
+                    
+                    # Try to get posts for this discussion
+                    try:
+                        posts = self.kaggle_api.competitions_discussions_comments_list(competition_slug, discussion.id)
+                        for post in posts[:5]:  # Limit to first 5 posts
+                            post_data = {
+                                "author": post.author,
+                                "content": getattr(post, 'message', 'No content'),
+                                "date": getattr(post, 'postedDate', datetime.now().isoformat())
+                            }
+                            thread_data["posts"].append(post_data)
+                    except Exception as post_error:
+                        print("Could not get posts for discussion {}: {}".format(discussion.id, post_error))
+                    
+                    discussion_threads.append(thread_data)
+                
+                print("Retrieved {} discussion threads via API".format(len(discussion_threads)))
+                return discussion_threads
+                
+            except Exception as e:
+                print("Error getting discussions via API:", e)
+        
+        # Fallback: Try basic web scraping approach
+        print("Trying basic web scraping for discussions...")
+        return self._scrape_discussions_web(competition_slug, max_threads)
+    
+    def _scrape_discussions_web(self, competition_slug, max_threads=20):
+        """Fallback web scraping method for discussions"""
+        
+        # Try different approaches to get discussion data
+        approaches = [
+            self._try_api_style_discussions,
+            self._try_mobile_page_discussions,
+            self._try_search_discussions
+        ]
+        
+        for approach in approaches:
+            try:
+                discussions = approach(competition_slug, max_threads)
+                if discussions and len(discussions) > 1:  # More than just placeholder
+                    return discussions
+            except Exception as e:
+                print("Approach failed:", e)
+                continue
+        
+        print("All discussion scraping approaches failed")
+        return self._get_placeholder_discussions(competition_slug)
+    
+    def _try_api_style_discussions(self, competition_slug, max_threads):
+        """Try to access discussions via internal API endpoints"""
+        # This might not work without authentication, but worth trying
+        api_url = "https://www.kaggle.com/api/i/competitions.CompetitionsService/GetCompetitionDiscussionTopics"
+        
+        # Try with different endpoints that might be publicly accessible
+        public_urls = [
+            "https://www.kaggle.com/competitions/{}/discussion.json".format(competition_slug),
+            "https://www.kaggle.com/api/v1/competitions/{}/topics".format(competition_slug)
+        ]
+        
+        for url in public_urls:
+            try:
+                response = self.session.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    print("Found JSON data from:", url)
+                    # Process JSON data here
+                    return self._process_discussion_json(data, competition_slug)
+            except:
+                continue
+        
+        return []
+    
+    def _try_mobile_page_discussions(self, competition_slug, max_threads):
+        """Try mobile version which might have simpler HTML"""
+        mobile_url = "https://m.kaggle.com/competitions/{}/discussion".format(competition_slug)
+        
+        try:
+            # Try with mobile user agent
+            mobile_headers = self.session.headers.copy()
+            mobile_headers['User-Agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15'
+            
+            response = self.session.get(mobile_url, headers=mobile_headers)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                # Process mobile page
+                return self._extract_discussions_from_soup(soup, competition_slug)
+        except:
+            pass
+        
+        return []
+    
+    def _try_search_discussions(self, competition_slug, max_threads):
+        """Try to find discussions through Kaggle search"""
+        search_url = "https://www.kaggle.com/search"
+        params = {
+            'q': 'competition:{} type:discussions'.format(competition_slug)
+        }
+        
+        try:
+            response = self.session.get(search_url, params=params)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                return self._extract_discussions_from_soup(soup, competition_slug)
+        except:
+            pass
+        
+        return []
+    
+    def _extract_discussions_from_soup(self, soup, competition_slug):
+        """Extract discussion data from BeautifulSoup object"""
+        discussions = []
+        
+        # Look for any links that might be discussions
+        all_links = soup.find_all('a', href=True)
+        
+        for link in all_links:
+            href = link.get('href', '')
+            if '/discussion/' in href:
+                # Extract discussion ID
+                match = re.search(r'/discussion/(\d+)', href)
+                if match:
+                    discussion_id = match.group(1)
+                    title = link.get_text().strip()
+                    
+                    if title and len(title) > 10:  # Meaningful title
+                        discussions.append({
+                            "id": discussion_id,
+                            "title": title,
+                            "author": "Unknown",
+                            "replyCount": 0,
+                            "voteCount": 0,
+                            "url": "https://www.kaggle.com" + href if href.startswith('/') else href,
+                            "posts": [{
+                                "author": "System",
+                                "content": "Visit the discussion URL for full content: {}".format(href),
+                                "date": datetime.now().isoformat()
+                            }]
+                        })
+        
+        return discussions
+    
+    def _process_discussion_json(self, data, competition_slug):
+        """Process JSON discussion data"""
+        discussions = []
+        # Implementation would depend on JSON structure
+        # This is a placeholder for when we find working JSON endpoints
+        return discussions
+    
+    def _get_placeholder_discussions(self, competition_slug):
+        """Get placeholder discussion data with helpful information"""
         return [
             {
-                "id": "1",
-                "title": "Discussion threads require JavaScript rendering",
+                "id": "info",
+                "title": "How to Access Discussions",
                 "author": "System",
                 "replyCount": 0,
                 "voteCount": 0,
                 "url": "https://www.kaggle.com/competitions/{}/discussion".format(competition_slug),
-                "posts": [
-                    {
-                        "author": "System",
-                        "content": "Discussion content requires JavaScript execution to load properly.",
-                        "date": datetime.now().isoformat()
-                    }
-                ]
+                "posts": [{
+                    "author": "System",
+                    "content": """Discussion content is dynamically loaded with JavaScript and requires either:
+1. Kaggle API access (recommended) - Set up kaggle.json file
+2. Browser automation (Selenium) - More complex but possible
+3. Manual browsing - Visit the competition discussion page directly
+
+For now, this scraper provides basic competition info and notebook data.""",
+                    "date": datetime.now().isoformat()
+                }]
             }
         ]
     
