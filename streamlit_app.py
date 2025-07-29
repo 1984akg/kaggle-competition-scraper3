@@ -60,8 +60,8 @@ def main():
 def scrape_competition(url: str, max_threads: int, max_notebooks: int, max_posts: int):
     """Scrape competition data and display results"""
     
-    # Initialize scraper
-    scraper = KaggleCompetitionScraper()
+    # Initialize scraper with Streamlit mode
+    scraper = KaggleCompetitionScraper(use_selenium=False, streamlit_mode=True)
     
     # Progress tracking
     progress_bar = st.progress(0)

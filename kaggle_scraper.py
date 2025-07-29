@@ -32,7 +32,7 @@ except Exception as e:
 
 
 class KaggleCompetitionScraper:
-    def __init__(self, use_selenium=True):
+    def __init__(self, use_selenium=True, streamlit_mode=None):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -41,11 +41,40 @@ class KaggleCompetitionScraper:
             'Connection': 'keep-alive',
         })
         self.kaggle_api = None
-        self.use_selenium = use_selenium and SELENIUM_AVAILABLE
+        
+        # Detect Streamlit environment
+        if streamlit_mode is None:
+            streamlit_mode = self._detect_streamlit_environment()
+        
+        self.streamlit_mode = streamlit_mode
+        self.use_selenium = use_selenium and SELENIUM_AVAILABLE and not streamlit_mode
         self.driver = None
+        
         self._init_kaggle_api()
         if self.use_selenium:
             self._init_selenium_driver()
+    
+    def _detect_streamlit_environment(self):
+        """Detect if running in Streamlit environment"""
+        try:
+            import streamlit as st
+            # Multiple checks for Streamlit environment
+            if hasattr(st, 'session_state') or hasattr(st, 'scriptrunner') or 'streamlit' in str(type(st)):
+                return True
+        except ImportError:
+            pass
+        
+        # Check for Streamlit-related environment variables or modules
+        import sys
+        if any('streamlit' in str(module).lower() for module in sys.modules.keys()):
+            return True
+            
+        # Check if running in a typical Streamlit port environment
+        import os
+        if os.environ.get('STREAMLIT_SERVER_PORT') or os.environ.get('STREAMLIT'):
+            return True
+            
+        return False
     
     def _init_selenium_driver(self):
         """Initialize Selenium WebDriver"""
@@ -151,6 +180,9 @@ class KaggleCompetitionScraper:
     def scrape_discussion_threads(self, competition_slug, max_threads=20):
         """Get discussion threads using Kaggle API or fallback methods"""
         
+        if self.streamlit_mode:
+            print("Running in Streamlit mode - using optimized approach...")
+        
         # Try Kaggle API first for discussions
         if self.kaggle_api:
             try:
@@ -191,9 +223,58 @@ class KaggleCompetitionScraper:
             except Exception as e:
                 print("Error getting discussions via API:", e)
         
-        # Fallback: Try basic web scraping approach
+        # For Streamlit mode, provide informative placeholders instead of trying Selenium
+        if self.streamlit_mode:
+            print("Streamlit mode: Providing informative discussion placeholders...")
+            return self._get_streamlit_discussion_info(competition_slug, max_threads)
+        
+        # Fallback: Try basic web scraping approach (non-Streamlit)
         print("Trying basic web scraping for discussions...")
         return self._scrape_discussions_web(competition_slug, max_threads)
+    
+    def _get_streamlit_discussion_info(self, competition_slug, max_threads):
+        """Provide helpful discussion information for Streamlit users"""
+        return [
+            {
+                "id": "streamlit-info",
+                "title": "💡 Discussion Access Information",
+                "author": "System",
+                "replyCount": 0,
+                "voteCount": 0,
+                "url": "https://www.kaggle.com/competitions/{}/discussion".format(competition_slug),
+                "posts": [{
+                    "author": "Scraper System",
+                    "content": """**Discussion data requires special setup:**
+
+🔑 **For full discussion access, set up Kaggle API:**
+1. Go to Kaggle.com → Your Account → API
+2. Click "Create New API Token"
+3. Place kaggle.json in ~/.kaggle/ directory
+4. Restart this Streamlit app
+
+🌐 **Alternative - Browse discussions directly:**
+Visit: https://www.kaggle.com/competitions/{}/discussion
+
+⚡ **Current limitation:** Streamlit environment doesn't support browser automation (Selenium) needed for dynamic content scraping.
+
+📊 **Available data:** Competition overview and notebooks are working normally.""".format(competition_slug),
+                    "date": datetime.now().isoformat()
+                }]
+            },
+            {
+                "id": "manual-access",
+                "title": "🔗 Access Discussions Manually",
+                "author": "Helper",
+                "replyCount": 0,
+                "voteCount": 0,
+                "url": "https://www.kaggle.com/competitions/{}/discussion".format(competition_slug),
+                "posts": [{
+                    "author": "Navigation Helper",
+                    "content": "Click the URL above to view all competition discussions in your browser. You can participate in discussions, view solutions, and learn from the community there.",
+                    "date": datetime.now().isoformat()
+                }]
+            }
+        ]
     
     def _scrape_discussions_web(self, competition_slug, max_threads=20):
         """Web scraping method for discussions using Selenium"""
