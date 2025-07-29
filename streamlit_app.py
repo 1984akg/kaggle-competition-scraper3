@@ -27,7 +27,7 @@ def main():
         # Scraping options
         st.subheader("Scraping Options")
         max_threads = st.slider("Max Discussion Threads", 5, 100, 20)
-        max_notebooks = st.slider("Max Notebooks", 5, 100, 30)
+        max_notebooks = st.slider("Max Notebooks", 5, 1000, 1000)
         max_posts_per_thread = st.slider("Max Posts per Thread", 3, 50, 10)
     
     # Main content area

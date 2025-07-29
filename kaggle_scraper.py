@@ -506,10 +506,14 @@ class KaggleCompetitionScraper:
                 self.driver.get(url)
                 # Wait for content to load
                 try:
-                    WebDriverWait(self.driver, 10).until(
+                    WebDriverWait(self.driver, 15).until(
                         EC.presence_of_element_located((By.TAG_NAME, "a"))
                     )
-                    time.sleep(3)  # Additional wait for dynamic content
+                    time.sleep(5)  # Additional wait for dynamic content
+                    
+                    # Try to scroll to load more content
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
                 except:
                     pass
                 html_content = self.driver.page_source
@@ -522,13 +526,19 @@ class KaggleCompetitionScraper:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 print("Using requests for notebook scraping")
             
-            # Find notebook elements
+            # Find notebook elements with updated selectors
             notebook_selectors = [
                 'div[data-testid="code-item"]',
+                'div[data-testid="kernel-item"]', 
                 '.sc-code-item',
                 '.kernel-item',
                 'div.code-item',
-                'a[href*="/code/"]'
+                'div[class*="kernel"]',
+                'div[class*="code"]',
+                'a[href*="/code/"]',
+                'article',
+                '.sc-fzplWN',
+                '.sc-fzoyAV'
             ]
             
             notebook_elements = []
@@ -541,8 +551,15 @@ class KaggleCompetitionScraper:
             
             # Fallback to generic search
             if not notebook_elements:
-                notebook_elements = soup.find_all(['div'], class_=re.compile(r'kernel|code|notebook'))
+                notebook_elements = soup.find_all(['div', 'article'], class_=re.compile(r'kernel|code|notebook'))
                 print(f"Fallback found {len(notebook_elements)} notebook elements")
+            
+            # Additional fallback - look for any links to code pages
+            if not notebook_elements:
+                code_links = soup.find_all('a', href=re.compile(r'/code/'))
+                notebook_elements = [link.find_parent() for link in code_links if link.find_parent()]
+                notebook_elements = [elem for elem in notebook_elements if elem]
+                print(f"Code link fallback found {len(notebook_elements)} notebook elements")
             
             for notebook_elem in notebook_elements[:max_notebooks]:
                 notebook_data = self._extract_notebook_info(notebook_elem)
