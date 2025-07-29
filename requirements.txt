@@ -1,0 +1,9 @@
+requests
+beautifulsoup4
+streamlit
+kaggle
+pandas
+markdownify
+lxml
+selenium
+webdriver-manager
