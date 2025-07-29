@@ -5,9 +5,20 @@ import time
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
-from kaggle.api.kaggle_api_extended import KaggleApi
 import markdown
 from markdownify import markdownify as md
+
+# Try to import Kaggle API, but make it optional
+try:
+    from kaggle.api.kaggle_api_extended import KaggleApi
+    KAGGLE_API_AVAILABLE = True
+except ImportError:
+    KAGGLE_API_AVAILABLE = False
+    print("Warning: Kaggle API not available. Some features will be limited.")
+except Exception as e:
+    KAGGLE_API_AVAILABLE = False
+    print(f"Warning: Could not import Kaggle API: {e}")
+    print("Continuing with web scraping only.")
 
 
 class KaggleCompetitionScraper:
@@ -24,9 +35,11 @@ class KaggleCompetitionScraper:
         try:
             self.kaggle_api = KaggleApi()
             self.kaggle_api.authenticate()
+            print("Kaggle API authenticated successfully")
         except Exception as e:
             print(f"Warning: Could not authenticate with Kaggle API: {e}")
             print("Some features (notebooks) will not be available")
+            self.kaggle_api = None
     
     def extract_competition_slug(self, url: str) -> str:
         """Extract competition slug from URL"""
@@ -76,7 +89,9 @@ class KaggleCompetitionScraper:
         """Extract competition title"""
         title_selectors = [
             'h1[data-testid="competition-title"]',
-            'h1.competition-header__title',
+            'h1.sc-fFeiMQ',  # Updated selector
+            'h1.sc-hKMtZM',  # Another common selector
+            '.competition-title h1',
             'h1',
             '.competition-header h1'
         ]
@@ -92,14 +107,22 @@ class KaggleCompetitionScraper:
         """Extract competition description"""
         description_selectors = [
             '[data-testid="competition-description"]',
+            '.sc-competition-overview__content',
             '.competition-description',
-            '.competition-overview-description'
+            '.competition-overview-description',
+            '.markdown',
+            '.rendered-markdown'
         ]
         
         for selector in description_selectors:
             element = soup.select_one(selector)
             if element:
                 return md(str(element))
+        
+        # Try to find any markdown content
+        markdown_elements = soup.find_all(['div'], class_=lambda x: x and 'markdown' in x.lower() if x else False)
+        if markdown_elements:
+            return md(str(markdown_elements[0]))
         
         return "Description not found"
     
@@ -166,8 +189,25 @@ class KaggleCompetitionScraper:
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find thread elements
-            thread_elements = soup.find_all(['div', 'tr'], class_=re.compile(r'topic|thread|discussion'))
+            # Find thread elements with updated selectors
+            thread_selectors = [
+                'div[data-testid="discussion-topic"]',
+                '.sc-discussion-topic',
+                'tr.sc-topic-row',
+                'div.topic-item',
+                'tr.topic-row'
+            ]
+            
+            thread_elements = []
+            for selector in thread_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    thread_elements = elements
+                    break
+            
+            # Fallback to generic search
+            if not thread_elements:
+                thread_elements = soup.find_all(['div', 'tr'], class_=re.compile(r'topic|thread|discussion'))
             
             for thread_elem in thread_elements[:max_threads]:
                 thread_data = self._extract_thread_info(thread_elem, competition_slug)
@@ -186,8 +226,24 @@ class KaggleCompetitionScraper:
     def _extract_thread_info(self, thread_elem, competition_slug: str) -> Optional[Dict]:
         """Extract information from a single thread element"""
         try:
-            # Extract thread title and link
-            title_link = thread_elem.find('a', href=re.compile(r'/discussion/'))
+            # Extract thread title and link with multiple selectors
+            title_link_selectors = [
+                'a[href*="/discussion/"]',
+                'a[data-testid="discussion-link"]',
+                '.discussion-title a',
+                '.topic-title a'
+            ]
+            
+            title_link = None
+            for selector in title_link_selectors:
+                title_link = thread_elem.select_one(selector)
+                if title_link:
+                    break
+            
+            # Fallback to generic search
+            if not title_link:
+                title_link = thread_elem.find('a', href=re.compile(r'/discussion/'))
+            
             if not title_link:
                 return None
             
@@ -320,37 +376,148 @@ class KaggleCompetitionScraper:
             print(f"Error extracting post info: {e}")
             return None
     
-    def get_competition_notebooks(self, competition_slug: str, max_notebooks: int = 50) -> List[Dict]:
-        """Get notebooks for a competition using Kaggle API"""
-        if not self.kaggle_api:
-            print("Kaggle API not available")
-            return []
+    def get_competition_notebooks(self, competition_slug: str, max_notebooks: int = 1000) -> List[Dict]:
+        """Get notebooks for a competition using Kaggle API or web scraping"""
+        # Try Kaggle API first
+        if self.kaggle_api:
+            try:
+                # Get notebooks list
+                notebooks = self.kaggle_api.kernels_list(
+                    competition=competition_slug,
+                    page_size=max_notebooks
+                )
+                
+                notebook_data = []
+                for notebook in notebooks:
+                    notebook_info = {
+                        "id": notebook.ref,
+                        "title": notebook.title,
+                        "author": notebook.author,
+                        "votes": getattr(notebook, 'totalVotes', 0),
+                        "url": f"https://www.kaggle.com/{notebook.ref}",
+                        "lastRunTime": getattr(notebook, 'lastRunTime', None),
+                        "language": getattr(notebook, 'language', 'unknown')
+                    }
+                    notebook_data.append(notebook_info)
+                
+                return notebook_data
+                
+            except Exception as e:
+                print(f"Error getting notebooks via API: {e}")
+        
+        # Fallback to web scraping
+        print("Falling back to web scraping for notebooks...")
+        return self._scrape_notebooks_from_web(competition_slug, max_notebooks)
+    
+    def _scrape_notebooks_from_web(self, competition_slug: str, max_notebooks: int = 1000) -> List[Dict]:
+        """Scrape notebooks from competition code page"""
+        url = f"https://www.kaggle.com/competitions/{competition_slug}/code"
+        notebooks = []
         
         try:
-            # Get notebooks list
-            notebooks = self.kaggle_api.kernels_list(
-                competition=competition_slug,
-                page_size=max_notebooks
-            )
+            response = self.session.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            notebook_data = []
-            for notebook in notebooks:
-                notebook_info = {
-                    "id": notebook.ref,
-                    "title": notebook.title,
-                    "author": notebook.author,
-                    "votes": getattr(notebook, 'totalVotes', 0),
-                    "url": f"https://www.kaggle.com/{notebook.ref}",
-                    "lastRunTime": getattr(notebook, 'lastRunTime', None),
-                    "language": getattr(notebook, 'language', 'unknown')
-                }
-                notebook_data.append(notebook_info)
+            # Find notebook elements
+            notebook_selectors = [
+                'div[data-testid="code-item"]',
+                '.sc-code-item',
+                '.kernel-item',
+                'div.code-item'
+            ]
             
-            return notebook_data
+            notebook_elements = []
+            for selector in notebook_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    notebook_elements = elements
+                    break
+            
+            # Fallback to generic search
+            if not notebook_elements:
+                notebook_elements = soup.find_all(['div'], class_=re.compile(r'kernel|code|notebook'))
+            
+            for notebook_elem in notebook_elements[:max_notebooks]:
+                notebook_data = self._extract_notebook_info(notebook_elem)
+                if notebook_data:
+                    notebooks.append(notebook_data)
+            
+            return notebooks
             
         except Exception as e:
-            print(f"Error getting competition notebooks: {e}")
+            print(f"Error scraping notebooks from web: {e}")
             return []
+    
+    def _extract_notebook_info(self, notebook_elem) -> Optional[Dict]:
+        """Extract information from a notebook element"""
+        try:
+            # Extract title and link
+            title_link_selectors = [
+                'a[href*="/code/"]',
+                '.kernel-title a',
+                '.code-title a',
+                'h3 a',
+                'h4 a'
+            ]
+            
+            title_link = None
+            for selector in title_link_selectors:
+                title_link = notebook_elem.select_one(selector)
+                if title_link:
+                    break
+            
+            if not title_link:
+                return None
+            
+            title = title_link.get_text().strip()
+            href = title_link.get('href', '')
+            
+            # Extract author
+            author_selectors = [
+                '.kernel-author',
+                '.code-author',
+                '[data-testid="author"]',
+                '.author'
+            ]
+            
+            author = "Unknown"
+            for selector in author_selectors:
+                author_elem = notebook_elem.select_one(selector)
+                if author_elem:
+                    author = author_elem.get_text().strip()
+                    break
+            
+            # Extract vote count
+            vote_selectors = [
+                '.vote-count',
+                '.votes',
+                '[data-testid="votes"]'
+            ]
+            
+            votes = 0
+            for selector in vote_selectors:
+                vote_elem = notebook_elem.select_one(selector)
+                if vote_elem:
+                    vote_text = vote_elem.get_text().strip()
+                    numbers = re.findall(r'\d+', vote_text)
+                    if numbers:
+                        votes = int(numbers[0])
+                    break
+            
+            return {
+                "id": href.split('/')[-1] if href else "unknown",
+                "title": title,
+                "author": author,
+                "votes": votes,
+                "url": f"https://www.kaggle.com{href}" if href.startswith('/') else href,
+                "lastRunTime": None,
+                "language": "unknown"
+            }
+            
+        except Exception as e:
+            print(f"Error extracting notebook info: {e}")
+            return None
     
     def scrape_all_competition_data(self, competition_url: str) -> Dict:
         """Scrape all data for a competition"""
