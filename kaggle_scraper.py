@@ -22,7 +22,7 @@ except ImportError:
     print("Warning: Kaggle API not available. Some features will be limited.")
 except Exception as e:
     KAGGLE_API_AVAILABLE = False
-    print(f"Warning: Could not import Kaggle API: {e}")
+    print("Warning: Could not import Kaggle API:", e)
     print("Continuing with web scraping only.")
 
 
@@ -30,7 +30,12 @@ class KaggleCompetitionScraper:
     def __init__(self, use_selenium=True):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
         self.kaggle_api = None
         self.use_selenium = use_selenium
@@ -50,7 +55,7 @@ class KaggleCompetitionScraper:
             self.kaggle_api.authenticate()
             print("Kaggle API authenticated successfully")
         except Exception as e:
-            print(f"Warning: Could not authenticate with Kaggle API: {e}")
+            print("Warning: Could not authenticate with Kaggle API:", e)
             print("Some features (notebooks) will not be available")
             self.kaggle_api = None
     
@@ -71,7 +76,7 @@ class KaggleCompetitionScraper:
             print("Selenium WebDriver initialized successfully")
             
         except Exception as e:
-            print(f"Warning: Could not initialize Selenium WebDriver: {e}")
+            print("Warning: Could not initialize Selenium WebDriver:", e)
             print("Falling back to requests-based scraping")
             self.driver = None
             self.use_selenium = False
@@ -122,13 +127,18 @@ class KaggleCompetitionScraper:
                 print("Using requests for scraping")
             
             # Debug: Print some of the HTML to understand structure
-            print(f"Page title: {soup.title.string if soup.title else 'No title'}")
+            print("Page title:", soup.title.string if soup.title else 'No title')
             
             # Look for h1 tags to debug title extraction
             h1_tags = soup.find_all('h1')
-            print(f"Found {len(h1_tags)} h1 tags")
+            print("Found", len(h1_tags), "h1 tags")
             for i, h1 in enumerate(h1_tags[:3]):
-                print(f"H1 {i+1}: {h1.get_text().strip()[:100]}")
+                print("H1", i+1, ":", h1.get_text().strip()[:100])
+            
+            # Debug: Print page structure for analysis
+            print("Looking for content on page:", url)
+            all_text = soup.get_text()[:500]  # First 500 chars
+            print("Page text preview:", all_text)
             
             # Extract basic information
             title = self._extract_title(soup)
@@ -148,24 +158,37 @@ class KaggleCompetitionScraper:
             }
             
         except Exception as e:
-            print(f"Error scraping competition overview: {e}")
+            print("Error scraping competition overview:", e)
             return {}
     
     def _extract_title(self, soup: BeautifulSoup) -> str:
         """Extract competition title"""
         title_selectors = [
             'h1[data-testid="competition-title"]',
-            'h1.sc-fFeiMQ',  # Updated selector
-            'h1.sc-hKMtZM',  # Another common selector
+            'h1.sc-fFeiMQ',
+            'h1.sc-hKMtZM',
+            'h1.sc-ksYbfQ',
+            'h1.sc-dxgOiQ',
             '.competition-title h1',
-            'h1',
-            '.competition-header h1'
+            '.competition-header h1',
+            'div[data-testid="competition-title"] h1',
+            'h1[class*="sc-"]',
+            'h1[class*="competition"]',
+            'h1'
         ]
         
         for selector in title_selectors:
             element = soup.select_one(selector)
             if element:
-                return element.get_text().strip()
+                title_text = element.get_text().strip()
+                print(f"Found title with selector '{selector}': {title_text}")
+                return title_text
+        
+        # Additional debug for title extraction
+        print("Title extraction debug:")
+        h1_elements = soup.find_all('h1')
+        for i, h1 in enumerate(h1_elements[:5]):
+            print(f"H1 {i+1}: {h1.get_text().strip()[:100]} (classes: {h1.get('class', [])})")
         
         return "Title not found"
     
@@ -173,23 +196,41 @@ class KaggleCompetitionScraper:
         """Extract competition description"""
         description_selectors = [
             '[data-testid="competition-description"]',
+            '[data-testid="overview-description"]',
             '.sc-competition-overview__content',
             '.competition-description',
             '.competition-overview-description',
+            '.overview-description',
             '.markdown',
-            '.rendered-markdown'
+            '.rendered-markdown',
+            'div[class*="markdown"]',
+            'div[class*="overview"]',
+            'div[class*="description"]'
         ]
         
         for selector in description_selectors:
             element = soup.select_one(selector)
             if element:
-                return md(str(element))
+                description_text = md(str(element))
+                print(f"Found description with selector '{selector}': {description_text[:100]}...")
+                return description_text
         
         # Try to find any markdown content
         markdown_elements = soup.find_all(['div'], class_=lambda x: x and 'markdown' in x.lower() if x else False)
         if markdown_elements:
-            return md(str(markdown_elements[0]))
+            description_text = md(str(markdown_elements[0]))
+            print(f"Found description via markdown search: {description_text[:100]}...")
+            return description_text
         
+        # Additional fallback - look for any content-rich divs
+        content_divs = soup.find_all('div', class_=re.compile(r'content|text|body'))
+        for div in content_divs[:3]:
+            if len(div.get_text().strip()) > 100:  # Only consider substantial content
+                description_text = md(str(div))
+                print(f"Found description via content div: {description_text[:100]}...")
+                return description_text
+        
+        print("Description extraction failed - no suitable content found")
         return "Description not found"
     
     def _extract_timeline(self, soup: BeautifulSoup) -> Dict:
@@ -219,8 +260,12 @@ class KaggleCompetitionScraper:
         """Extract competition reward information"""
         reward_selectors = [
             '[data-testid="competition-prize"]',
+            '[data-testid="prize"]',
             '.competition-prize',
-            '.prize-amount'
+            '.prize-amount',
+            '.prize',
+            'div[class*="prize"]',
+            'span[class*="prize"]'
         ]
         
         for selector in reward_selectors:
@@ -256,10 +301,23 @@ class KaggleCompetitionScraper:
                 self.driver.get(url)
                 # Wait for content to load
                 try:
-                    WebDriverWait(self.driver, 10).until(
+                    WebDriverWait(self.driver, 15).until(
                         EC.presence_of_element_located((By.TAG_NAME, "a"))
                     )
-                    time.sleep(3)  # Additional wait for dynamic content
+                    time.sleep(5)  # Additional wait for dynamic content
+                    
+                    # Try to scroll to load more content
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
+                    
+                    # Try to click "Load more" button if exists
+                    try:
+                        load_more_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Load') or contains(text(), 'More') or contains(text(), 'Show')]")
+                        if load_more_btn.is_displayed():
+                            load_more_btn.click()
+                            time.sleep(3)
+                    except:
+                        pass
                 except:
                     pass
                 html_content = self.driver.page_source
@@ -275,11 +333,18 @@ class KaggleCompetitionScraper:
             # Find thread elements with updated selectors
             thread_selectors = [
                 'div[data-testid="discussion-topic"]',
+                'div[data-testid="topic-item"]',
                 '.sc-discussion-topic',
                 'tr.sc-topic-row',
                 'div.topic-item',
                 'tr.topic-row',
-                'a[href*="/discussion/"]'
+                'div[class*="topic"]',
+                'tr[class*="topic"]',
+                'div[class*="discussion"]',
+                'a[href*="/discussion/"]',
+                '.sc-fzplWN',
+                '.sc-fzoyAV',
+                'li[class*="topic"]'
             ]
             
             thread_elements = []
@@ -292,8 +357,23 @@ class KaggleCompetitionScraper:
             
             # Fallback to generic search
             if not thread_elements:
-                thread_elements = soup.find_all(['div', 'tr'], class_=re.compile(r'topic|thread|discussion'))
+                thread_elements = soup.find_all(['div', 'tr', 'li'], class_=re.compile(r'topic|thread|discussion'))
                 print(f"Fallback found {len(thread_elements)} discussion elements")
+            
+            # Additional fallback - look for any links to discussion pages
+            if not thread_elements:
+                discussion_links = soup.find_all('a', href=re.compile(r'/discussion/'))
+                thread_elements = [link.find_parent() for link in discussion_links if link.find_parent()]
+                thread_elements = [elem for elem in thread_elements if elem]
+                print(f"Discussion link fallback found {len(thread_elements)} discussion elements")
+            
+            # Debug: Print some HTML structure to understand the page
+            if not thread_elements:
+                print("No discussion elements found. Checking page structure...")
+                all_links = soup.find_all('a', href=True)
+                discussion_links_count = len([link for link in all_links if '/discussion/' in link.get('href', '')])
+                print(f"Found {discussion_links_count} discussion links in total")
+                print(f"Page title: {soup.title.string if soup.title else 'No title'}")
             
             for thread_elem in thread_elements[:max_threads]:
                 thread_data = self._extract_thread_info(thread_elem, competition_slug)
