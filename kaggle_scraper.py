@@ -5,8 +5,13 @@ import time
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
-import markdown
 from markdownify import markdownify as md
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Try to import Kaggle API, but make it optional
 try:
@@ -22,16 +27,24 @@ except Exception as e:
 
 
 class KaggleCompetitionScraper:
-    def __init__(self):
+    def __init__(self, use_selenium=True):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         self.kaggle_api = None
+        self.use_selenium = use_selenium
+        self.driver = None
         self._init_kaggle_api()
+        if use_selenium:
+            self._init_selenium_driver()
     
     def _init_kaggle_api(self):
         """Initialize Kaggle API if credentials are available"""
+        if not KAGGLE_API_AVAILABLE:
+            self.kaggle_api = None
+            return
+            
         try:
             self.kaggle_api = KaggleApi()
             self.kaggle_api.authenticate()
@@ -40,6 +53,36 @@ class KaggleCompetitionScraper:
             print(f"Warning: Could not authenticate with Kaggle API: {e}")
             print("Some features (notebooks) will not be available")
             self.kaggle_api = None
+    
+    def _init_selenium_driver(self):
+        """Initialize Selenium WebDriver"""
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            
+            self.driver = webdriver.Chrome(
+                service=webdriver.chrome.service.Service(ChromeDriverManager().install()),
+                options=chrome_options
+            )
+            print("Selenium WebDriver initialized successfully")
+            
+        except Exception as e:
+            print(f"Warning: Could not initialize Selenium WebDriver: {e}")
+            print("Falling back to requests-based scraping")
+            self.driver = None
+            self.use_selenium = False
+    
+    def __del__(self):
+        """Clean up WebDriver"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
     
     def extract_competition_slug(self, url: str) -> str:
         """Extract competition slug from URL"""
@@ -60,9 +103,32 @@ class KaggleCompetitionScraper:
         url = f"https://www.kaggle.com/competitions/{competition_slug}/overview"
         
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if self.use_selenium and self.driver:
+                # Use Selenium for dynamic content
+                self.driver.get(url)
+                # Wait for content to load
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "h1"))
+                )
+                time.sleep(2)  # Additional wait for dynamic content
+                html_content = self.driver.page_source
+                soup = BeautifulSoup(html_content, 'html.parser')
+                print("Using Selenium for scraping")
+            else:
+                # Fallback to requests
+                response = self.session.get(url)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                print("Using requests for scraping")
+            
+            # Debug: Print some of the HTML to understand structure
+            print(f"Page title: {soup.title.string if soup.title else 'No title'}")
+            
+            # Look for h1 tags to debug title extraction
+            h1_tags = soup.find_all('h1')
+            print(f"Found {len(h1_tags)} h1 tags")
+            for i, h1 in enumerate(h1_tags[:3]):
+                print(f"H1 {i+1}: {h1.get_text().strip()[:100]}")
             
             # Extract basic information
             title = self._extract_title(soup)
@@ -185,9 +251,26 @@ class KaggleCompetitionScraper:
         threads = []
         
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if self.use_selenium and self.driver:
+                # Use Selenium for dynamic content
+                self.driver.get(url)
+                # Wait for content to load
+                try:
+                    WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "a"))
+                    )
+                    time.sleep(3)  # Additional wait for dynamic content
+                except:
+                    pass
+                html_content = self.driver.page_source
+                soup = BeautifulSoup(html_content, 'html.parser')
+                print("Using Selenium for discussion scraping")
+            else:
+                # Fallback to requests
+                response = self.session.get(url)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                print("Using requests for discussion scraping")
             
             # Find thread elements with updated selectors
             thread_selectors = [
@@ -195,7 +278,8 @@ class KaggleCompetitionScraper:
                 '.sc-discussion-topic',
                 'tr.sc-topic-row',
                 'div.topic-item',
-                'tr.topic-row'
+                'tr.topic-row',
+                'a[href*="/discussion/"]'
             ]
             
             thread_elements = []
@@ -203,11 +287,13 @@ class KaggleCompetitionScraper:
                 elements = soup.select(selector)
                 if elements:
                     thread_elements = elements
+                    print(f"Found {len(elements)} discussion elements with selector: {selector}")
                     break
             
             # Fallback to generic search
             if not thread_elements:
                 thread_elements = soup.find_all(['div', 'tr'], class_=re.compile(r'topic|thread|discussion'))
+                print(f"Fallback found {len(thread_elements)} discussion elements")
             
             for thread_elem in thread_elements[:max_threads]:
                 thread_data = self._extract_thread_info(thread_elem, competition_slug)
@@ -415,16 +501,34 @@ class KaggleCompetitionScraper:
         notebooks = []
         
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if self.use_selenium and self.driver:
+                # Use Selenium for dynamic content
+                self.driver.get(url)
+                # Wait for content to load
+                try:
+                    WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "a"))
+                    )
+                    time.sleep(3)  # Additional wait for dynamic content
+                except:
+                    pass
+                html_content = self.driver.page_source
+                soup = BeautifulSoup(html_content, 'html.parser')
+                print("Using Selenium for notebook scraping")
+            else:
+                # Fallback to requests
+                response = self.session.get(url)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                print("Using requests for notebook scraping")
             
             # Find notebook elements
             notebook_selectors = [
                 'div[data-testid="code-item"]',
                 '.sc-code-item',
                 '.kernel-item',
-                'div.code-item'
+                'div.code-item',
+                'a[href*="/code/"]'
             ]
             
             notebook_elements = []
@@ -432,11 +536,13 @@ class KaggleCompetitionScraper:
                 elements = soup.select(selector)
                 if elements:
                     notebook_elements = elements
+                    print(f"Found {len(elements)} notebook elements with selector: {selector}")
                     break
             
             # Fallback to generic search
             if not notebook_elements:
                 notebook_elements = soup.find_all(['div'], class_=re.compile(r'kernel|code|notebook'))
+                print(f"Fallback found {len(notebook_elements)} notebook elements")
             
             for notebook_elem in notebook_elements[:max_notebooks]:
                 notebook_data = self._extract_notebook_info(notebook_elem)
